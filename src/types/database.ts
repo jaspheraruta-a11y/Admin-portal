@@ -5,6 +5,7 @@ export interface Device {
   os_name: string;
   cpu_model: string;
   total_ram_gb: number;
+  lab_classification?: string; // <-- ADD THIS LINE
   last_seen: string;
 }
 

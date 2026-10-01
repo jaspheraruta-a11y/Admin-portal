@@ -25,7 +25,8 @@ import {
   Lock,
   RotateCcw,
   Skull,
-  Search
+  Search,
+  Building2
 } from 'lucide-react';
 
 export default function App() {
@@ -35,82 +36,100 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [currentTime, setCurrentTime] = useState(Date.now());
 
+  // Search & Classification Filter State
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedLab, setSelectedLab] = useState<string>('ALL');
+
   // Modal State
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null);
   const [modalTelemetry, setModalTelemetry] = useState<TelemetryLog | null>(null);
   const [modalActivities, setModalActivities] = useState<ActivityLog[]>([]);
+  const [editingLab, setEditingLab] = useState<string>('');
 
   // Task Manager Modal State
   const [isProcessModalOpen, setIsProcessModalOpen] = useState(false);
   const [selectedProcessToKill, setSelectedProcessToKill] = useState<string>('');
   const [processSearch, setProcessSearch] = useState('');
 
-  // Keep a ref to the selected device so the realtime listener always has
-  // the current active PC without dropping the WebSocket channel connection!
   const selectedDeviceRef = useRef<Device | null>(null);
   useEffect(() => {
     selectedDeviceRef.current = selectedDevice;
   }, [selectedDevice]);
 
-  // Dispatch remote action to target PC via Supabase with FULL error reporting
+  // Dispatch remote action to target PC
   const dispatchCommand = async (command: 'LOCK' | 'RESTART' | 'KILL_PROCESS', payload?: string) => {
-    if (!selectedDevice) {
-      alert("Error: No PC selected!");
-      return;
-    }
+    if (!selectedDevice) return;
 
     if (command === 'RESTART' && !confirm(`Are you sure you want to remotely RESTART ${selectedDevice.hostname}?`)) {
       return;
     }
 
-    console.log(`[DISPATCH] Target Device ID: ${selectedDevice.id} | Command: ${command}`);
-
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from('device_commands')
       .insert({
         device_id: selectedDevice.id,
         command,
         payload: payload || null,
         status: 'PENDING'
-      })
-      .select();
+      });
 
     if (error) {
-      console.error('Supabase insert error:', error);
-      alert(`❌ SUPABASE REJECTED COMMAND:\n${error.message}`);
+      alert(`Failed to send command: ${error.message}`);
     } else {
-      console.log('Successfully inserted into Supabase:', data);
-      alert(`✅ Command '${command}' queued for ${selectedDevice.hostname}! It will execute within 10 seconds.`);
+      alert(`Command '${command}' queued for ${selectedDevice.hostname}!`);
     }
   };
 
-  // Heartbeat threshold: 25-second window for responsive demo detection
+  // Manually update Lab classification for a device
+  const updateDeviceLab = async (deviceId: string, newLab: string) => {
+    if (!newLab.trim()) return;
+    
+    const { error } = await supabase
+      .from('devices')
+      .update({ lab_classification: newLab.trim() })
+      .eq('id', deviceId);
+
+    if (error) {
+      alert(`Error updating lab: ${error.message}`);
+    } else {
+      setDevices(prev => prev.map(d => d.id === deviceId ? { ...d, lab_classification: newLab.trim() } : d));
+      if (selectedDevice) {
+        setSelectedDevice({ ...selectedDevice, lab_classification: newLab.trim() });
+      }
+      alert(`Workstation reassigned to: ${newLab.trim()}`);
+    }
+  };
+
   const isOnline = (lastSeen: string) => {
     const diffInSeconds = (currentTime - new Date(lastSeen).getTime()) / 1000;
     return diffInSeconds < 25;
   };
 
-  // Re-evaluate online/offline status every 3 seconds for snappy UI updates
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(Date.now()), 3000);
     return () => clearInterval(timer);
   }, []);
 
-  // Fetch Fleet & Tickets
   const fetchData = async () => {
     setLoading(true);
     try {
       const { data: devicesData } = await supabase
         .from('devices')
         .select('*')
-        .order('last_seen', { ascending: false });
+        .order('hostname', { ascending: true });
 
       const { data: ticketsData } = await supabase
         .from('maintenance_tickets')
         .select('*, devices(*)')
         .order('created_at', { ascending: false });
 
-      if (devicesData) setDevices(devicesData);
+      if (devicesData) {
+        const sortedDevices = [...devicesData].sort((a, b) => 
+          a.hostname.localeCompare(b.hostname, undefined, { numeric: true, sensitivity: 'base' })
+        );
+        setDevices(sortedDevices);
+      }
+
       if (ticketsData) setTickets(ticketsData);
     } catch (err) {
       console.error('Error fetching data:', err);
@@ -119,21 +138,13 @@ export default function App() {
     }
   };
 
-  // Realtime Subscriptions (Runs once on mount: empty array [])
   useEffect(() => {
     fetchData();
 
     const channel = supabase
       .channel('fleet-realtime')
-      // Update fleet list when a new PC registers or sends a heartbeat
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, () => {
-        fetchData();
-      })
-      // Update tickets table when a ticket is created/resolved
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'maintenance_tickets' }, () => {
-        fetchData();
-      })
-      // Update live gauges inside modal (No full DB reload needed!)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'maintenance_tickets' }, () => fetchData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'telemetry_logs' }, (payload) => {
         const currentSelected = selectedDeviceRef.current;
         if (
@@ -146,7 +157,6 @@ export default function App() {
           setModalTelemetry(payload.new as TelemetryLog);
         }
       })
-      // Append new activities into modal timeline live
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity_logs' }, (payload) => {
         const currentSelected = selectedDeviceRef.current;
         if (
@@ -166,9 +176,9 @@ export default function App() {
     };
   }, []);
 
-  // Open Device Details Modal
   const openDeviceModal = async (device: Device) => {
     setSelectedDevice(device);
+    setEditingLab(device.lab_classification || 'Computer Laboratory 1');
     setIsProcessModalOpen(false);
     setSelectedProcessToKill('');
     setProcessSearch('');
@@ -204,7 +214,6 @@ export default function App() {
     fetchData();
   };
 
-  // Helper for rendering event icons and colors
   const renderActivityIcon = (type: string) => {
     switch (type) {
       case 'REMOTE_ACTION':
@@ -230,6 +239,24 @@ export default function App() {
     }
   };
 
+  // Extract distinct list of all laboratories
+  const availableLabs = Array.from(
+    new Set(devices.map(d => d.lab_classification || 'Computer Laboratory 1'))
+  );
+
+  // Filtered devices based on search and lab tab
+  const filteredDevices = devices.filter((device) => {
+    const matchesSearch = 
+      device.hostname.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      device.mac_address.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (device.os_name && device.os_name.toLowerCase().includes(searchTerm.toLowerCase()));
+
+    const currentDeviceLab = device.lab_classification || 'Computer Laboratory 1';
+    const matchesLab = selectedLab === 'ALL' || currentDeviceLab === selectedLab;
+
+    return matchesSearch && matchesLab;
+  });
+
   // KPI Calculations
   const totalDevices = devices.length;
   const openTickets = tickets.filter(t => t.status === 'Open');
@@ -241,7 +268,6 @@ export default function App() {
   const healthyPercent = totalDevices > 0 ? ((healthyCount / totalDevices) * 100).toFixed(1) : '100.0';
   const activePercent = totalDevices > 0 ? Math.round((onlineDevicesCount / totalDevices) * 100) : 0;
 
-  // Filter processes in task manager modal
   const runningProcessesList = modalTelemetry?.running_processes || [];
   const filteredProcesses = runningProcessesList.filter(p => 
     p.toLowerCase().includes(processSearch.toLowerCase())
@@ -279,9 +305,7 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
         
-        {/* ============================================================ */}
-        {/* EXECUTIVE KPI METRIC SUMMARY CARDS (4-CARD GRID)            */}
-        {/* ============================================================ */}
+        {/* KPI METRIC SUMMARY CARDS */}
         <section aria-label="Fleet Performance KPIs" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           
           {/* CARD 1: MONITORED FLEET */}
@@ -370,7 +394,6 @@ export default function App() {
                 <span className="text-[11px] font-semibold text-rose-400 uppercase tracking-wider">
                   CRITICAL INCIDENTS
                 </span>
-                {/* Dual-Layer Pulsating Ping Beacon Container */}
                 <div className="relative">
                   <div className="h-8 w-8 rounded-lg bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400">
                     <ShieldAlert className="w-4 h-4" />
@@ -426,18 +449,68 @@ export default function App() {
 
         {/* Tab View: Fleet Grid */}
         {activeTab === 'fleet' && (
-          <div>
-            {devices.length === 0 ? (
+          <div className="space-y-4">
+            
+            {/* Search & Lab Filter Toolbar */}
+            <div className="bg-slate-900/60 border border-slate-800 p-3 rounded-xl flex flex-col md:flex-row gap-3 items-center justify-between">
+              
+              {/* Search Box */}
+              <div className="relative w-full md:w-80">
+                <Search className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="Search PC by name, MAC, or OS..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full bg-slate-950/80 border border-slate-800 rounded-lg pl-9 pr-4 py-2 text-xs text-slate-200 placeholder:text-slate-500 outline-none focus:border-indigo-500/50 transition"
+                />
+              </div>
+
+              {/* Lab Classification Filter Tabs */}
+              <div className="flex items-center gap-1.5 overflow-x-auto w-full md:w-auto pb-1 md:pb-0">
+                <button
+                  onClick={() => setSelectedLab('ALL')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition shrink-0 ${
+                    selectedLab === 'ALL'
+                      ? 'bg-indigo-600 text-white shadow-sm'
+                      : 'bg-slate-800/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                  }`}
+                >
+                  All ({devices.length})
+                </button>
+                {availableLabs.map((lab) => {
+                  const labCount = devices.filter(d => (d.lab_classification || 'Computer Laboratory 1') === lab).length;
+                  return (
+                    <button
+                      key={lab}
+                      onClick={() => setSelectedLab(lab)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 shrink-0 ${
+                        selectedLab === lab
+                          ? 'bg-indigo-600 text-white shadow-sm'
+                          : 'bg-slate-800/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                      }`}
+                    >
+                      <Building2 className="w-3.5 h-3.5" />
+                      {lab} ({labCount})
+                    </button>
+                  );
+                })}
+              </div>
+
+            </div>
+
+            {/* Grid Cards */}
+            {filteredDevices.length === 0 ? (
               <div className="text-center py-16 bg-slate-900/50 border border-slate-800 rounded-2xl">
                 <Monitor className="w-12 h-12 mx-auto text-slate-600 mb-3" />
-                <h3 className="text-lg font-medium text-slate-300">No Workstations Registered Yet</h3>
+                <h3 className="text-lg font-medium text-slate-300">No Matching Workstations</h3>
                 <p className="text-sm text-slate-500 max-w-sm mx-auto mt-1">
-                  Run the diagnostic agent on a PC to register it automatically.
+                  Try adjusting your search query or switching lab filter tabs.
                 </p>
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {devices.map((device) => {
+                {filteredDevices.map((device) => {
                   const online = isOnline(device.last_seen);
                   return (
                     <div 
@@ -445,7 +518,7 @@ export default function App() {
                       onClick={() => openDeviceModal(device)}
                       className="bg-slate-900 border border-slate-800 hover:border-indigo-500/50 rounded-xl p-5 cursor-pointer transition transform hover:-translate-y-1 shadow-lg group"
                     >
-                      <div className="flex justify-between items-start mb-4">
+                      <div className="flex justify-between items-start mb-3">
                         <div>
                           <h3 className="font-semibold text-base text-slate-200 group-hover:text-indigo-400 transition">
                             {device.hostname}
@@ -459,6 +532,14 @@ export default function App() {
                         }`}>
                           <span className={`w-2 h-2 rounded-full ${online ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
                           {online ? 'ONLINE (ON)' : 'OFFLINE (OFF)'}
+                        </span>
+                      </div>
+
+                      {/* Lab Location Badge */}
+                      <div className="mb-4">
+                        <span className="inline-flex items-center gap-1.5 text-[11px] px-2.5 py-0.5 rounded-md bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 font-medium">
+                          <Building2 className="w-3 h-3 text-indigo-400" />
+                          {device.lab_classification || 'Computer Laboratory 1'}
                         </span>
                       </div>
 
@@ -545,9 +626,7 @@ export default function App() {
         )}
       </main>
 
-      {/* ============================================================ */}
-      {/* PC DETAILS & DIAGNOSTICS MODAL                               */}
-      {/* ============================================================ */}
+      {/* PC DETAILS & DIAGNOSTICS MODAL */}
       {selectedDevice && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 w-full max-w-3xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -583,6 +662,32 @@ export default function App() {
             {/* Modal Body */}
             <div className="p-6 space-y-6 overflow-y-auto">
 
+              {/* Lab Location Assignment Bar */}
+              <div className="bg-slate-950/60 border border-slate-800 p-3.5 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <Building2 className="w-4 h-4 text-indigo-400" />
+                  <div>
+                    <p className="text-xs font-semibold text-slate-300">Assigned Laboratory / Location</p>
+                    <p className="text-[11px] text-slate-500">Group this PC into a room classification</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                  <input
+                    type="text"
+                    placeholder="e.g. Computer Laboratory 1"
+                    value={editingLab}
+                    onChange={(e) => setEditingLab(e.target.value)}
+                    className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 outline-none focus:border-indigo-500 w-full sm:w-56"
+                  />
+                  <button
+                    onClick={() => updateDeviceLab(selectedDevice.id, editingLab)}
+                    className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition shrink-0"
+                  >
+                    Save Lab
+                  </button>
+                </div>
+              </div>
+
               {/* Remote Actions Control Panel */}
               <div className="bg-slate-950/80 border border-slate-800 p-4 rounded-xl">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3 flex items-center gap-2">
@@ -608,7 +713,7 @@ export default function App() {
                     Reboot System
                   </button>
 
-                  {/* Action 3: Terminate Application (Opens Dedicated Process Modal) */}
+                  {/* Action 3: Terminate Application */}
                   <button
                     onClick={() => {
                       setSelectedProcessToKill('');
@@ -738,9 +843,7 @@ export default function App() {
         </div>
       )}
 
-      {/* ============================================================ */}
-      {/* TASK MANAGER / TERMINATE APPLICATION MODAL                   */}
-      {/* ============================================================ */}
+      {/* TASK MANAGER / TERMINATE APPLICATION MODAL */}
       {isProcessModalOpen && selectedDevice && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[60] flex items-center justify-center p-4 animate-in fade-in duration-150">
           <div className="bg-slate-900 border border-slate-800 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
@@ -778,7 +881,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Process List (Scrollable) */}
+            {/* Process List */}
             <div className="p-4 overflow-y-auto flex-1 space-y-1.5 max-h-[350px]">
               {filteredProcesses.length === 0 ? (
                 <div className="py-12 text-center text-xs text-slate-500">
