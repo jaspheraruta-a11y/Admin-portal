@@ -26,7 +26,15 @@ import {
   RotateCcw,
   Skull,
   Search,
-  Building2
+  Building2,
+  AppWindow,
+  Globe,
+  FileText,
+  Code,
+  Music,
+  Gamepad2,
+  Terminal,
+  MessageSquare
 } from 'lucide-react';
 
 export default function App() {
@@ -55,6 +63,61 @@ export default function App() {
   useEffect(() => {
     selectedDeviceRef.current = selectedDevice;
   }, [selectedDevice]);
+
+  // List of known user-facing desktop applications
+  const KNOWN_USER_APPS = new Set([
+    'chrome.exe', 'msedge.exe', 'firefox.exe', 'brave.exe', 'opera.exe',
+    'notepad.exe', 'notepad++.exe', 'calc.exe', 'calculator.exe',
+    'code.exe', 'devenv.exe', 'pycharm.exe', 'sublime_text.exe',
+    'spotify.exe', 'vlc.exe', 'itunes.exe', 'wmplayer.exe',
+    'discord.exe', 'teams.exe', 'slack.exe', 'zoom.exe', 'telegram.exe',
+    'steam.exe', 'epicgameslauncher.exe', 'valorant.exe', 'leagueclient.exe', 'robloxplayerbeta.exe',
+    'winword.exe', 'excel.exe', 'powerpnt.exe', 'photoshop.exe', 'illustrator.exe',
+    'obs64.exe', 'blender.exe', 'cmd.exe', 'powershell.exe', 'windowsterminal.exe'
+  ]);
+
+  // Determines if process is an Application vs Background Program
+  const isAppProcess = (procName: string) => {
+    const lower = procName.toLowerCase();
+    return KNOWN_USER_APPS.has(lower) || 
+           lower.includes('chrome') || 
+           lower.includes('edge') || 
+           lower.includes('game') || 
+           lower.includes('player') || 
+           lower.includes('editor');
+  };
+
+  // Resolves colorful application-specific icons based on process name
+  const getProcessIcon = (procName: string, isApp: boolean) => {
+    const lower = procName.toLowerCase();
+    
+    if (lower.includes('chrome') || lower.includes('edge') || lower.includes('firefox') || lower.includes('brave') || lower.includes('opera')) {
+      return <Globe className="w-4 h-4 text-sky-400 shrink-0" />;
+    }
+    if (lower.includes('notepad') || lower.includes('word') || lower.includes('excel') || lower.includes('acrobat') || lower.includes('calc')) {
+      return <FileText className="w-4 h-4 text-emerald-400 shrink-0" />;
+    }
+    if (lower.includes('code') || lower.includes('devenv') || lower.includes('pycharm') || lower.includes('studio')) {
+      return <Code className="w-4 h-4 text-blue-400 shrink-0" />;
+    }
+    if (lower.includes('spotify') || lower.includes('vlc') || lower.includes('music') || lower.includes('player')) {
+      return <Music className="w-4 h-4 text-green-400 shrink-0" />;
+    }
+    if (lower.includes('steam') || lower.includes('epic') || lower.includes('valorant') || lower.includes('game') || lower.includes('roblox')) {
+      return <Gamepad2 className="w-4 h-4 text-purple-400 shrink-0" />;
+    }
+    if (lower.includes('discord') || lower.includes('teams') || lower.includes('slack') || lower.includes('zoom') || lower.includes('telegram')) {
+      return <MessageSquare className="w-4 h-4 text-indigo-400 shrink-0" />;
+    }
+    if (lower.includes('cmd') || lower.includes('powershell') || lower.includes('terminal')) {
+      return <Terminal className="w-4 h-4 text-amber-400 shrink-0" />;
+    }
+
+    if (isApp) {
+      return <AppWindow className="w-4 h-4 text-cyan-400 shrink-0" />;
+    }
+    return <Cpu className="w-4 h-4 text-slate-500 shrink-0" />;
+  };
 
   // Dispatch remote action to target PC
   const dispatchCommand = async (command: 'LOCK' | 'RESTART' | 'KILL_PROCESS', payload?: string) => {
@@ -257,21 +320,17 @@ export default function App() {
     return matchesSearch && matchesLab;
   });
 
-  // KPI Calculations
+  // KPI Calculations (Accurate unique PC health counting)
   const totalDevices = devices.length;
   const openTickets = tickets.filter(t => t.status === 'Open');
   const onlineDevicesCount = devices.filter(d => isOnline(d.last_seen)).length;
   const criticalCount = openTickets.filter(t => t.severity === 'Critical').length;
   const warningCount = openTickets.filter(t => t.severity === 'Warning').length;
 
-  const healthyCount = Math.max(0, totalDevices - openTickets.length);
+  const unhealthyDeviceIds = new Set(openTickets.map(t => t.device_id));
+  const healthyCount = Math.max(0, totalDevices - unhealthyDeviceIds.size);
   const healthyPercent = totalDevices > 0 ? ((healthyCount / totalDevices) * 100).toFixed(1) : '100.0';
   const activePercent = totalDevices > 0 ? Math.round((onlineDevicesCount / totalDevices) * 100) : 0;
-
-  const runningProcessesList = modalTelemetry?.running_processes || [];
-  const filteredProcesses = runningProcessesList.filter(p => 
-    p.toLowerCase().includes(processSearch.toLowerCase())
-  );
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
@@ -881,40 +940,97 @@ export default function App() {
               </div>
             </div>
 
-            {/* Process List */}
-            <div className="p-4 overflow-y-auto flex-1 space-y-1.5 max-h-[350px]">
-              {filteredProcesses.length === 0 ? (
-                <div className="py-12 text-center text-xs text-slate-500">
-                  {runningProcessesList.length === 0 
-                    ? "No active user processes reported yet. Ensure agent.py is running."
-                    : "No matching running applications found."}
-                </div>
-              ) : (
-                filteredProcesses.map((procName) => {
-                  const isSelected = selectedProcessToKill === procName;
+            {/* Process List (Classified into Applications & Background Programs) */}
+            <div className="p-4 overflow-y-auto flex-1 space-y-4 max-h-[380px]">
+              {(() => {
+                const rawList = (modalTelemetry?.running_processes || []) as (string | { name: string })[];
+                const processNames = rawList.map(item => typeof item === 'string' ? item : item.name);
+
+                const filtered = processNames.filter(name => 
+                  name.toLowerCase().includes(processSearch.toLowerCase())
+                );
+
+                const apps = filtered.filter(name => isAppProcess(name));
+                const background = filtered.filter(name => !isAppProcess(name));
+
+                if (filtered.length === 0) {
                   return (
-                    <div
-                      key={procName}
-                      onClick={() => setSelectedProcessToKill(procName)}
-                      className={`px-3 py-2.5 rounded-xl border text-xs font-mono cursor-pointer flex items-center justify-between transition ${
-                        isSelected 
-                          ? 'bg-rose-500/15 border-rose-500/50 text-rose-300 font-semibold shadow-sm' 
-                          : 'bg-slate-950/50 border-slate-800/80 text-slate-300 hover:bg-slate-800/50 hover:border-slate-700'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5 truncate">
-                        <span className={`w-2 h-2 rounded-full ${isSelected ? 'bg-rose-400 animate-pulse' : 'bg-slate-600'}`} />
-                        <span className="truncate">{procName}</span>
-                      </div>
-                      {isSelected && (
-                        <span className="text-[10px] uppercase font-bold tracking-wider text-rose-400 bg-rose-500/20 px-2 py-0.5 rounded-full">
-                          Selected
-                        </span>
-                      )}
+                    <div className="py-12 text-center text-xs text-slate-500">
+                      {processNames.length === 0 
+                        ? "No running processes reported yet. Ensure agent is running."
+                        : "No matching applications found."}
                     </div>
                   );
-                })
-              )}
+                }
+
+                return (
+                  <>
+                    {/* SECTION 1: USER APPLICATIONS */}
+                    {apps.length > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-2 px-1 mb-1 text-[11px] font-semibold text-cyan-400 uppercase tracking-wider">
+                          <AppWindow className="w-3.5 h-3.5" />
+                          Applications ({apps.length})
+                        </div>
+                        {apps.map((procName) => {
+                          const isSelected = selectedProcessToKill === procName;
+                          return (
+                            <div
+                              key={procName}
+                              onClick={() => setSelectedProcessToKill(procName)}
+                              className={`px-3 py-2.5 rounded-xl border text-xs cursor-pointer flex items-center justify-between transition ${
+                                isSelected 
+                                  ? 'bg-rose-500/15 border-rose-500/50 text-rose-300 font-semibold shadow-sm' 
+                                  : 'bg-slate-950/60 border-slate-800 text-slate-200 hover:bg-slate-800/60 hover:border-slate-700'
+                              }`}
+                            >
+                              <div className="flex items-center gap-3 truncate">
+                                {getProcessIcon(procName, true)}
+                                <span className="font-mono font-medium truncate">{procName}</span>
+                              </div>
+                              <span className="text-[10px] font-semibold text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded-full shrink-0">
+                                App
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* SECTION 2: BACKGROUND PROGRAMS */}
+                    {background.length > 0 && (
+                      <div className="space-y-1.5 pt-2">
+                        <div className="flex items-center gap-2 px-1 mb-1 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                          <Cpu className="w-3.5 h-3.5" />
+                          Background Programs ({background.length})
+                        </div>
+                        {background.map((procName) => {
+                          const isSelected = selectedProcessToKill === procName;
+                          return (
+                            <div
+                              key={procName}
+                              onClick={() => setSelectedProcessToKill(procName)}
+                              className={`px-3 py-2 rounded-xl border text-xs cursor-pointer flex items-center justify-between transition ${
+                                isSelected 
+                                  ? 'bg-rose-500/15 border-rose-500/50 text-rose-300 font-semibold shadow-sm' 
+                                  : 'bg-slate-950/40 border-slate-800/70 text-slate-300 hover:bg-slate-800/40 hover:border-slate-700'
+                              }`}
+                            >
+                              <div className="flex items-center gap-3 truncate">
+                                {getProcessIcon(procName, false)}
+                                <span className="font-mono text-xs truncate">{procName}</span>
+                              </div>
+                              <span className="text-[10px] text-slate-500 bg-slate-800 px-2 py-0.5 rounded-full shrink-0">
+                                Background
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             {/* Footer with Actions */}
